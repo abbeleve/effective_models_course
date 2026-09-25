@@ -1,5 +1,8 @@
 {
-  "tau_s_per_launch": 1.26144290105693e-05,
-  "flops_per_s": 5900439567090.214,
-  "bytes_per_s": 132665888143.62651
+  "tau_s_per_launch": 1.5557070185427704e-05,
+  "flops_per_s": 6281007220910.049,
+  "bytes_per_s": 140866001240.87997,
+  "base_power_w": 51.25783086212798,
+  "joules_per_gflop": 0.021158684927632544,
+  "joules_per_gb": 0.0
 }

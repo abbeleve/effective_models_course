@@ -3,15 +3,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, nnls
 
-from equations import KERNEL_COUNT, data_moved, flops, latency
+from equations import KERNEL_COUNT, data_moved, energy, flops, latency
 
 
 HERE = Path(__file__).resolve().parent
 MEASUREMENTS = HERE / "results" / "measurements.csv"
 THETA = HERE / "results" / "theta.json"
-SEED = 676767
 
 def _theta(log_params):
     total_launch_time, performance, bandwidth = np.exp(log_params)
@@ -23,13 +22,13 @@ def _theta(log_params):
 
 
 def calibrate(measurements_path=MEASUREMENTS, theta_path=THETA):
-    """Fit on 80% of usable rows and report error on the held-out 20%."""
+    """Fit on the base grid (is_validation=False) and report error on the random S/B pairs."""
     try:
         df = pd.read_csv(measurements_path)
     except pd.errors.EmptyDataError as exc:
         raise ValueError("Measurements CSV is empty; run measure.py on a GPU first") from exc
 
-    required = {"S", "B", "oom", "latency_s"}
+    required = {"S", "B", "oom", "latency_s", "is_validation"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Measurements CSV is missing columns: {sorted(missing)}")
@@ -40,18 +39,10 @@ def calibrate(measurements_path=MEASUREMENTS, theta_path=THETA):
     if usable.sum() < 5:
         raise ValueError("Need at least five positive, non-OOM latency measurements")
 
-    if "is_validation" not in df.columns:
-        df["is_validation"] = False
-        indices = df.index[usable].to_numpy()
-        rng = np.random.default_rng(SEED)
-        count = max(1, round(0.2 * len(indices)))
-        df.loc[rng.choice(indices, size=count, replace=False), "is_validation"] = True
-        df.to_csv(measurements_path, index=False)
-
     S = df.loc[usable, "S"].to_numpy(dtype=float)
     B = df.loc[usable, "B"].to_numpy(dtype=float)
     times = measured.loc[usable].to_numpy(dtype=float)
-    validation = df.loc[usable, "is_validation"].fillna(False).to_numpy(dtype=bool)
+    validation = df.loc[usable, "is_validation"].astype(str).str.lower().eq("true").to_numpy()
     training = ~validation
     if not training.any() or not validation.any():
         raise ValueError("Both training and validation rows are required")
@@ -87,6 +78,37 @@ def calibrate(measurements_path=MEASUREMENTS, theta_path=THETA):
     predicted = latency(S[validation], B[validation], theta)
     mape = 100 * np.mean(np.abs(predicted - times[validation]) / times[validation])
 
+    if "energy_j" not in df.columns:
+        raise ValueError("Measurements CSV is missing the energy_j column")
+    measured_energy = pd.to_numeric(df.loc[usable, "energy_j"], errors="coerce").to_numpy(dtype=float)
+    valid_energy = np.isfinite(measured_energy) & (measured_energy > 0)
+    energy_training = training & valid_energy
+    energy_validation = validation & valid_energy
+    if energy_training.sum() < 3 or not energy_validation.any():
+        raise ValueError("Need positive energy measurements in training and validation rows")
+
+    # Fit relative energy error so large configurations do not dominate the fit.
+    features = np.column_stack((
+        latency(S, B, theta),
+        flops(S, B) / 1e9,
+        data_moved(S, B) / 1e9,
+    ))
+    energy_values = measured_energy[energy_training]
+    energy_params, _ = nnls(
+        features[energy_training] / energy_values[:, None],
+        np.ones(len(energy_values)),
+    )
+    theta.update({
+        "base_power_w": float(energy_params[0]),
+        "joules_per_gflop": float(energy_params[1]),
+        "joules_per_gb": float(energy_params[2]),
+    })
+    energy_predicted = energy(S[energy_validation], B[energy_validation], theta)
+    energy_mape = 100 * np.mean(
+        np.abs(energy_predicted - measured_energy[energy_validation])
+        / measured_energy[energy_validation]
+    )
+
     theta_path = Path(theta_path)
     theta_path.parent.mkdir(parents=True, exist_ok=True)
     theta_path.write_text(json.dumps(theta, indent=2) + "\n", encoding="utf-8")
@@ -96,7 +118,8 @@ def calibrate(measurements_path=MEASUREMENTS, theta_path=THETA):
     memory_bound = int(np.count_nonzero(transfer_time > compute_time))
     compute_bound = int(training.sum()) - memory_bound
     print(f"Fitted theta: {theta}")
-    print(f"Validation MAPE: {mape:.1f}% ({validation.sum()} rows)")
+    print(f"Latency validation MAPE: {mape:.1f}% ({validation.sum()} rows)")
+    print(f"Energy validation MAPE: {energy_mape:.1f}% ({energy_validation.sum()} rows)")
     print(f"Training branches: memory {memory_bound}, compute {compute_bound}")
     if memory_bound == 0 or compute_bound == 0:
         print("Warning: one throughput parameter is weakly identified by this dataset")

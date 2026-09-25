@@ -13,7 +13,7 @@ class CNN(nn.Module):
         self.conv5 = nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=2, padding=3//2, bias=False)
         self.conv6 = nn.Conv2d(in_channels=256, out_channels=512, kernel_size=1, bias=False)
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Sequential(nn.Linear(512, 256), nn.ReLU(), nn.Linear(256, 100))
+        self.fc = nn.Sequential(nn.Linear(512, 256), nn.ReLU(inplace=True), nn.Linear(256, 100))
     
     def forward(self, x):
         x = self.maxpool1(self.act1(self.conv1(x)))
